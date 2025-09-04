@@ -424,28 +424,27 @@ def reddit_get_post_url(url: str) -> str:
 @beartype
 def reddit_get_post_comment_tree(page: Page | PseudoPage) -> Dict[str, Any]:
     try:
-        comment_tree = page.evaluate(
-            f"""(function buildCommentTree(node, data_level) {{
-    let tree = {{
-        "username": node.querySelector(".fg-inherit").outerText,
-        "net_score": parseInt(node.querySelector(".vote__net-score").outerText),
-        "content": node.querySelector(".comment__content").outerText,
-        "time": new Date(node.querySelector('.comment__main > header > h1 > span > time').dateTime),
-        "children": []
-    }};
-    node.querySelectorAll(".comment").forEach((child) => {{
-        if (parseInt(child.getAttribute('data-level')) === data_level+1) {{
-            tree['children'].push(buildCommentTree(child, data_level+1));
-        }}
-    }})
-
+        js_code='''(() => Array.from(document.querySelectorAll('#main > .comment[data-level="1"]')).map(n => (function buildCommentTree(node, data_level) {
+    let tree = {
+        username: node.querySelector(".fg-inherit").outerText,
+        net_score: parseInt(node.querySelector(".vote__net-score").outerText),
+        content: node.querySelector(".comment__content").outerText,
+        time: new Date(node.querySelector('.comment__main > header > h1 > span > time').dateTime),
+        children: []
+    };
+    node.querySelectorAll('.comment').forEach(child => {
+        if (parseInt(child.getAttribute('data-level')) === data_level+1) {
+            tree.children.push(buildCommentTree(child, data_level + 1));
+        }
+    });
     return tree;
-}})(document.querySelector("#main"), 0)"""
-        )
-    except Exception:
+    })(n, 1)))()'''
+        comment_tree = page.evaluate(js_code)
+    except Exception as e:
+        print(e)
         comment_tree = {}
 
-    return comment_tree
+    return {"comment_trees":comment_tree}
 
 
 @beartype
@@ -453,8 +452,8 @@ def reddit_get_latest_comment_obj_by_username(
     page: Page | PseudoPage, username: str
 ) -> Dict[str, Any]:
     try:
-        comment_tree = reddit_get_post_comment_tree(page)
-        latest_time = datetime.min.replace(tzinfo=timezone.utc)
+        comment_trees = reddit_get_post_comment_tree(page).get("comment_trees")
+        latest_time = datetime.min
         comment = {}
 
         def dfs(node):
@@ -472,10 +471,11 @@ def reddit_get_latest_comment_obj_by_username(
 
             for child in node["children"]:
                 dfs(child)
-
-        dfs(comment_tree)
+        for comment_tree in comment_trees:
+            dfs(comment_tree)
 
     except Exception as e:
+        print(e)
         comment = {}
     return comment
 
@@ -499,7 +499,7 @@ def reddit_get_parent_comment_obj_of_latest_comment_by_username(
     page: Page | PseudoPage, username: str
 ) -> Dict[str, Any]:
     try:
-        comment_tree = reddit_get_post_comment_tree(page)
+        comment_trees = reddit_get_post_comment_tree(page).get("comment_trees")
         latest_time = datetime.min.replace(tzinfo=timezone.utc)
         comment = {}
 
@@ -519,9 +519,11 @@ def reddit_get_parent_comment_obj_of_latest_comment_by_username(
                 else:
                     dfs(child)
 
-        dfs(comment_tree)
+        for comment_tree in comment_trees:
+            dfs(comment_tree)
 
-    except Exception:
+    except Exception as e:
+        print(e)
         comment = {}
     return comment
 

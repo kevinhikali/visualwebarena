@@ -202,7 +202,7 @@ class ScriptBrowserEnv(Env[dict[str, Observation], Action]):
                     client = page.context.new_cdp_session(page)
                     client.send("Accessibility.enable")
                     client.detach()
-                page.goto(url)
+                page.goto(url, timeout=120000)
             # set the first page as the current page
             self.page = self.context.pages[0]
             self.page.bring_to_front()
@@ -218,6 +218,11 @@ class ScriptBrowserEnv(Env[dict[str, Observation], Action]):
 
     def _get_obs(self) -> dict[str, Observation]:
         obs = self.observation_handler.get_observation(self.page)
+        tabs = self.context.pages
+        tabs_dict = {}
+        for i, tab in enumerate(tabs):
+            tabs_dict[f'Tab {i}: {tab.title()}'] = tab.url
+        obs['tabs'] = tabs_dict
         return obs
 
     def _get_obs_metadata(self) -> dict[str, ObservationMetadata]:

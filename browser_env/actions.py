@@ -6,6 +6,7 @@ import ast
 import random
 import re
 import string
+import time
 from enum import IntEnum
 from itertools import chain
 from typing import Any, TypedDict, Union, cast
@@ -199,6 +200,8 @@ def action2str(
                 action_str = f"upload [{action['text']}] to [{element_id}]"
             case ActionTypes.NONE:
                 action_str = "none"
+            case ActionTypes.WAIT:
+                action_str = "wait"
             case _:
                 raise ValueError(
                     f"Unknown action type {action['action_type']}"
@@ -341,6 +344,7 @@ class ActionTypes(IntEnum):
     STOP = 17
     CLEAR = 18
     UPLOAD = 19
+    WAIT = 20
     def __str__(self) -> str:
         return f"ACTION_TYPES.{self.name}"
 
@@ -391,6 +395,8 @@ def is_equivalent(a: Action, b: Action) -> bool:
             return a["pw_code"] == b["pw_code"]
         case ActionTypes.STOP:
             return a["answer"] == b["answer"]
+        case ActionTypes.WAIT:
+            return True
         case _:
             raise ValueError(f"Unknown action type: {a['action_type']}")
 
@@ -635,6 +641,16 @@ def create_goto_url_action(url: str) -> Action:
     )
     return action
 
+@beartype
+def create_wait_action() -> Action:
+    """Return a valid action object with type WAIT."""
+    action = create_none_action()
+    action.update(
+        {
+            "action_type": ActionTypes.WAIT,
+        }
+    )
+    return action
 
 @beartype
 def create_page_close_action() -> Action:
@@ -1052,7 +1068,7 @@ async def aexecute_type(keys: list[int], page: APage) -> None:
 @beartype
 def execute_focus(
     element_role: int, element_name: str, nth: int, page: Page
-) -> None:
+) -> bool:
     """Click the specified DOM element."""
     element_role_str = _id2role[element_role]
     if page.viewport_size is None:
@@ -1082,8 +1098,10 @@ def execute_focus(
         raise ValueError(
             f"There are only {len(element_location_list)} elements found in viewport, but {nth + 1} is requested"
         )
+    if len(element_location_list) > 5: return False
     element_location_list.sort(key=lambda x: (x[2], x[1]))  # row major order
     element_location_list[nth][0].focus()
+    return True
 
 
 @beartype
@@ -1272,7 +1290,16 @@ def execute_action(
     sleep_after_execution: float = 0.0,
 ) -> Page:
     """Execute the action on the ChromeDriver."""
-    action_type = action["action_type"]
+
+    action_type = action['action_type']
+    element_id = action['element_id']
+    element_role = action['element_role']
+    element_name = action['element_name']
+    pw_code = action['pw_code']
+    nth = action['nth']
+
+    action_method = 'normal'
+
     num_tabs_before = len(browser_ctx.pages)
     match action_type:
         case ActionTypes.NONE:
@@ -1300,22 +1327,41 @@ def execute_action(
         case ActionTypes.CLICK:
             # check each kind of locator in order
             # TODO[shuyanzh]: order is temp now
-            if action["element_id"]:
-                element_id = action["element_id"]
-                element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
-                execute_mouse_click(element_center[0], element_center[1], page)
-            elif action["element_role"] and action["element_name"]:
+
+            flag = False
+
+            if action['domain'] != 'reddit' and action["element_role"] and action["element_name"]:
                 element_role = int(action["element_role"])
                 element_name = action["element_name"]
                 nth = action["nth"]
-                execute_focus(element_role, element_name, nth, page)
-                execute_click_current(page)
-            elif action["pw_code"]:
+                try:
+                    flag = execute_focus(element_role, element_name, nth, page)
+                except Exception as e:
+                    flag = False
+                    print(e)
+                if flag: 
+                    try:
+                        execute_click_current(page)
+                        action_method = 'role, name, focus, click'
+                    except Exception as e:
+                        flag = False
+                        print(e)
+
+            if action["element_id"] and not flag:
+                element_id = action["element_id"]
+                element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
+                execute_mouse_click(element_center[0], element_center[1], page)
+                flag = True
+                action_method = 'element id mouse click'
+
+            if action["pw_code"] and not flag:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
                 # [shuyanzh], don't support action args and kwargs now
                 execute_playwright_click(locator_code=locator_code, page=page)
-            else:
+                flag = True
+            
+            if not flag:
                 raise ValueError("No proper locator found for click action")
         case ActionTypes.HOVER:
             if action["element_id"]:
@@ -1337,25 +1383,38 @@ def execute_action(
                     "No proper locator found for hover action"
                 )
         case ActionTypes.TYPE:
-            if action["element_id"]:
+            flag = False
+
+            if action["element_role"] and action["element_name"]:
+                element_role = int(action["element_role"])
+                element_name = action["element_name"]
+                nth = action["nth"]
+                try:
+                    flag = execute_focus(element_role, element_name, nth, page)
+                except Exception as e:
+                    flag = False
+                    print(e)
+                if flag: 
+                    try:
+                        execute_type(action["text"], page)
+                        action_method = 'role, name, focus, type'
+                    except Exception as e:
+                        flag = False
+                        print(e)
+
+            if action["element_id"] and not flag:
                 element_id = action["element_id"]
                 element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
                 execute_mouse_click(element_center[0], element_center[1], page)
                 execute_type(action["text"], page)
-            elif action["element_role"] and action["element_name"]:
-                element_role = int(action["element_role"])
-                element_name = action["element_name"]
-                nth = action["nth"]
-                execute_focus(element_role, element_name, nth, page)
-                execute_type(action["text"], page)
-            elif action["pw_code"]:
+                action_method = 'element id mouse click type'
+
+            elif action["pw_code"] and not flag:
                 parsed_code = parse_playwright_code(action["pw_code"])
                 locator_code = parsed_code[:-1]
                 text = parsed_code[-1]["arguments"][0]
                 # [shuyanzh], don't support action args and kwargs now
-                execute_playwright_type(
-                    text=text, locator_code=locator_code, page=page
-                )
+                execute_playwright_type(text=text, locator_code=locator_code, page=page)
             else:
                 raise NotImplementedError(
                     "No proper locator found for type action"
@@ -1401,6 +1460,8 @@ def execute_action(
             element_id = action["element_id"]
             element_center = obseration_processor.get_element_center(element_id)  # type: ignore[attr-defined]
             execute_upload(element_center[0], element_center[1], action["text"], page)
+        case ActionTypes.WAIT:
+            time.sleep(1)
         case _:
             raise ValueError(f"Unknown action type: {action_type}")
 
@@ -1698,6 +1759,135 @@ def create_playwright_action(playwright_code: str) -> Action:
 
     raise ActionParsingError(f"Unknown playwright action {action}")
 
+@beartype
+def create_mas_action(action_str: str, obs) -> Action:
+    """Main function to return individual id based action"""
+    obs_list = obs.split('\n')
+    obs_dict = {}
+    for content in obs_list:
+        idx = int(content[1:content.find(']')])
+        matches = re.findall(r'\[(.*?)\]', content)
+        if len(matches) == 3:
+            content = matches[2]
+        obs_dict[idx] = content
+    
+    action_str = action_str.strip()
+    if "[" in action_str:
+        action = action_str.split("[")[0].strip()
+    else:
+        actions = action_str.split()
+        if actions:
+            action = actions[0].strip()
+        else:
+            raise ActionParsingError(f"No action specified: {action_str}")
+
+    match action:
+        case "click":
+            match = re.search(r"click ?\[(\d+)\]", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid click action {action_str}")
+            element_id = match.group(1)
+            if int(element_id) > len(obs_list): 
+                last_element_id = obs_list[-1]
+                last_element_id = last_element_id[last_element_id.find('[')+1:last_element_id.find(']')]
+                last_element_id = int(last_element_id)
+                if int(element_id) > last_element_id:
+                    return create_none_action()
+            return create_click_action(element_id=element_id, element_name=obs_dict[int(element_id)])
+        case "clear":
+            match = re.search(r"clear ?\[(\d+)\]", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid clear action {action_str}")
+            element_id = match.group(1)
+            return create_clear_action(element_id=element_id)
+        case "upload":
+            # add default enter flag
+            if not (action_str.endswith("[0]") or action_str.endswith("[1]")):
+                action_str += " [1]"
+
+            match = re.search(
+                r"type ?\[(\d+)\] ?\[(.+)\] ?\[(\d+)\]", action_str
+            )
+            if not match:
+                raise ActionParsingError(f"Invalid type action {action_str}")
+            element_id, text, enter_flag = (
+                match.group(1),
+                match.group(2),
+                match.group(3),
+            )
+            if enter_flag == "1":
+                text += "\n"
+            return create_upload_action(text=text, element_id=element_id)
+        case "hover":
+            match = re.search(r"hover ?\[(\d+)\]", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid hover action {action_str}")
+            element_id = match.group(1)
+            return create_hover_action(element_id=element_id)
+        case "type":
+            # add default enter flag
+            if not (action_str.endswith("[0]") or action_str.endswith("[1]")):
+                action_str += " [1]"
+
+            match = re.search(
+                r"type ?\[(\d+)\] ?\[(.+)\] ?\[(\d+)\]", action_str
+            )
+            if not match:
+                raise ActionParsingError(f"Invalid type action {action_str}")
+            element_id, text, enter_flag = (
+                match.group(1),
+                match.group(2),
+                match.group(3),
+            )
+            if enter_flag == "1":
+                text += "\n"
+            return create_type_action(text=text, element_id=element_id)
+        case "press":
+            match = re.search(r"press ?\[(.+)\]", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid press action {action_str}")
+            key_comb = match.group(1)
+            return create_key_press_action(key_comb=key_comb)
+        case "scroll":
+            # up or down
+            match = re.search(r"scroll ?\[?(up|down)\]?", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid scroll action {action_str}")
+            direction = match.group(1)
+            return create_scroll_action(direction=direction)
+        case "goto":
+            match = re.search(r"goto ?\[(.+)\]", action_str)
+            if not match:
+                raise ActionParsingError(f"Invalid goto action {action_str}")
+            url = match.group(1)
+            return create_goto_url_action(url=url)
+        case "new_tab":
+            return create_new_tab_action()
+        case "go_back":
+            return create_go_back_action()
+        case "go_forward":
+            return create_go_forward_action()
+        case "tab_focus":
+            match = re.search(r"tab_focus ?\[(\d+)\]", action_str)
+            if not match:
+                raise ActionParsingError(
+                    f"Invalid tab_focus action {action_str}"
+                )
+            page_number = int(match.group(1))
+            return create_page_focus_action(page_number)
+        case "close_tab":
+            return create_page_close_action()
+        case "wait":
+            return create_wait_action()
+        case "stop":  # stop answer
+            match = re.search(r"stop ?\[(.+)\]", action_str)
+            if not match:  # some tasks don't require an answer
+                answer = ""
+            else:
+                answer = match.group(1)
+            return create_stop_action(answer)
+
+    raise ActionParsingError(f"Invalid action {action_str}")
 
 @beartype
 def create_id_based_action(action_str: str) -> Action:
